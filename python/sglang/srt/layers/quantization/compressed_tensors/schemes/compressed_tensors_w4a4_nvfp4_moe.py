@@ -309,6 +309,13 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
 
             assert layer.routing_method_type is not None
 
+            swiglu_limit = self.moe_runner_config.swiglu_limit
+            gemm1_clamp_limit = (
+                (float(swiglu_limit) / layer.g1_alphas).to(torch.float32)
+                if swiglu_limit is not None
+                else None
+            )
+
             quant_info = FlashInferTrtllmFp4MoeQuantInfo(
                 w13_weight=layer.w13_weight,
                 w2_weight=layer.w2_weight,
@@ -329,7 +336,7 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
                 intermediate_size_per_partition=layer.intermediate_size_per_partition,
                 routing_method_type=layer.routing_method_type,
                 use_per_token_activation=False,
-                gemm1_clamp_limit=None,
+                gemm1_clamp_limit=gemm1_clamp_limit,
             )
             return self.runner.run(dispatch_output, quant_info)
         else:
@@ -359,5 +366,15 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
                 moe_tp_size=layer.moe_tp_size,
                 moe_tp_rank=layer.moe_tp_rank,
                 apply_routed_scaling_factor=False,
+                swiglu_limit=(
+                    torch.full(
+                        (layer.num_local_experts,),
+                        float(self.moe_runner_config.swiglu_limit),
+                        dtype=torch.float32,
+                        device=x.device,
+                    )
+                    if self.moe_runner_config.swiglu_limit is not None
+                    else None
+                ),
             )
             return self.runner.run(dispatch_output, quant_info)
