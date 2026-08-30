@@ -59,6 +59,7 @@ class FlashInferCutlassMoeQuantInfo(MoeQuantInfo):
     moe_ep_size: int = 1
     moe_ep_rank: int = 0
     apply_routed_scaling_factor: bool = True
+    swiglu_limit: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -239,6 +240,7 @@ def _run_flashinfer_cutlass(
         tp_rank=quant_info.moe_tp_rank,
         tune_max_num_tokens=next_power_of_2(x.shape[0]),
         activation_type=_activation_type(runner_config),
+        swiglu_limit=quant_info.swiglu_limit,
         enable_alltoall=enable_alltoall,
         use_fused_finalize=envs.SGLANG_FLASHINFER_MOE_FUSED_FINALIZE.get(),
     )[0]
