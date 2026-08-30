@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 
 
 class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
+    fuse_routed_scaling_factor_in_topk = True
 
     def __init__(self):
         if not get_platform().is_blackwell:
