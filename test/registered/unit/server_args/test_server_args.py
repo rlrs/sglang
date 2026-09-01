@@ -157,6 +157,11 @@ class TestPrepareServerArgs(CustomTestCase):
         ):
             ServerArgs(model_path="dummy", prefill_decode_interval=-1).resolve_once()
 
+    def test_enable_fair_chunked_prefill(self):
+        args = ServerArgs(model_path="dummy", enable_fair_chunked_prefill=True)
+        args.resolve_once()
+        self.assertTrue(resolution_result(args, "enable_fair_chunked_prefill"))
+
     def test_dsv4_prefill_backend_cli_choices(self):
         parser = server_args_module.argparse.ArgumentParser()
         ServerArgs.add_cli_args(parser)

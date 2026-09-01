@@ -1204,6 +1204,16 @@ class Scheduler(
         self.chunked_prefill_size = get_schedule().chunked_prefill_size
         self.prefill_decode_interval = get_schedule().prefill_decode_interval
         self._prefill_decode_interval_remaining = 0
+        self.enable_fair_chunked_prefill = get_schedule().enable_fair_chunked_prefill
+        self._chunked_prefill_bypass_due = False
+        self._fair_chunked_prefill_decode_due = False
+        if self.enable_fair_chunked_prefill and (
+            self.ps.pp_size > 1 or self.require_mlp_sync
+        ):
+            raise ValueError(
+                "--enable-fair-chunked-prefill is not supported with pipeline "
+                "parallelism or distributed MLP synchronization"
+            )
         uses_transformers_backend = (
             get_resolved_model_impl(self.model_config) == ModelImpl.TRANSFORMERS
         )
@@ -1247,6 +1257,20 @@ class Scheduler(
         self._prefill_decode_interval_remaining -= 1
         return True
 
+    def _should_run_fair_chunked_prefill_decode(
+        self, running_batch: ScheduleBatch
+    ) -> bool:
+        if (
+            not getattr(self, "enable_fair_chunked_prefill", False)
+            or not getattr(self, "_fair_chunked_prefill_decode_due", False)
+            or running_batch.is_empty()
+            or running_batch.is_prefill_only
+        ):
+            return False
+
+        self._fair_chunked_prefill_decode_due = False
+        return True
+
     def _arm_prefill_decode_interval(self, batch: Optional[ScheduleBatch]) -> None:
         if self.prefill_decode_interval == 0 or batch is None:
             return
@@ -1261,6 +1285,30 @@ class Scheduler(
         )
         if is_extend:
             self._prefill_decode_interval_remaining = self.prefill_decode_interval
+
+    def _schedule_chunked_req_for_prefill(
+        self, adder: PrefillAdder, chunked_prefill_size: Optional[int]
+    ) -> Tuple[Optional[Req], bool]:
+        """Schedule the active partial request or park it for one short batch."""
+        if self.chunked_req is None:
+            return None, False
+
+        can_interleave = (
+            self.enable_fair_chunked_prefill
+            and self._chunked_prefill_bypass_due
+            and chunked_prefill_size is not None
+            and len(self.waiting_queue) > 0
+            and self.waiting_queue[0].beam_group is None
+            and len(self.waiting_queue[0].full_untruncated_fill_ids)
+            <= chunked_prefill_size
+        )
+        if can_interleave:
+            self._chunked_prefill_bypass_due = False
+            return None, True
+
+        self.chunked_req.init_next_round_input()
+        self.chunked_req = adder.add_chunked_req(self.chunked_req)
+        return self.chunked_req, False
 
     def init_metrics_reporter(
         self, tp_rank: int, pp_rank: int, dp_rank: Optional[int]
@@ -3282,6 +3330,8 @@ class Scheduler(
 
         if self.dllm_config is not None:
             new_batch = self.get_new_batch_dllm(running_batch)
+        elif self._should_run_fair_chunked_prefill_decode(running_batch):
+            new_batch = None
         elif self._should_defer_prefill():
             new_batch = None
         else:
@@ -3305,6 +3355,11 @@ class Scheduler(
         if new_batch is not None:
             # Run prefill first if possible
             ret = new_batch
+            if (
+                getattr(self, "enable_fair_chunked_prefill", False)
+                and new_batch.chunked_req is not None
+            ):
+                self._fair_chunked_prefill_decode_due = True
         else:
             # Run decode (skip for prefill-only batches)
             if not running_batch.is_empty() and not running_batch.is_prefill_only:
@@ -3483,9 +3538,9 @@ class Scheduler(
             prefill_tile_block_m=prefill_tile_block_m,
         )
 
-        if self.chunked_req is not None:
-            self.chunked_req.init_next_round_input()
-            self.chunked_req = adder.add_chunked_req(self.chunked_req)
+        batch_chunked_req, _ = self._schedule_chunked_req_for_prefill(
+            adder, chunked_prefill_size
+        )
 
         if self.enable_lora:
             running_loras = {
@@ -3616,9 +3671,11 @@ class Scheduler(
             # Update chunked prefill
             assert self.chunked_req is None
             self.chunked_req = adder.new_chunked_req
+            batch_chunked_req = self.chunked_req
 
-        if self.chunked_req is not None:
-            self.chunked_req.inflight_middle_chunks += 1
+        if batch_chunked_req is not None:
+            batch_chunked_req.inflight_middle_chunks += 1
+            self._chunked_prefill_bypass_due = True
 
         set_time_batch(can_run_list, "set_forward_entry_time")
 
@@ -3631,11 +3688,11 @@ class Scheduler(
             self.model_config,
             self.enable_overlap,
             self.spec_algorithm,
-            chunked_req=self.chunked_req,
+            chunked_req=batch_chunked_req,
         )
 
         new_batch.contains_last_prefill_chunk = (
-            self.chunked_req is None or len(can_run_list) != 1
+            batch_chunked_req is None or len(can_run_list) != 1
         )
 
         if self.enable_hierarchical_cache:
@@ -3657,8 +3714,8 @@ class Scheduler(
             self.enable_priority_scheduling,
             num_pending_tokens=self.load_inquirer._get_num_pending_tokens(
                 chunk_deduct=(
-                    self.chunked_req.extend_range.length
-                    if self.chunked_req is not None
+                    batch_chunked_req.extend_range.length
+                    if batch_chunked_req is not None
                     else 0
                 ),
             ),

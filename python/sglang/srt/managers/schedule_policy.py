@@ -1386,6 +1386,9 @@ class PrefillAdder:
                     storage_hit_len=req.storage_hit_length,
                 )
             else:
+                if has_chunked_req:
+                    return AddReqResult.OTHER
+
                 # Make sure at least one page is available
                 trunc_len = chunk_tokens_limit // self.page_size * self.page_size
 

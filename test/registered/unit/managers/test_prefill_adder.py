@@ -120,6 +120,22 @@ class TestPrefillAdder(CustomTestCase):
         defaults.update(kwargs)
         return PrefillAdder(**defaults)
 
+    def test_active_chunked_req_prevents_second_partial_prefill(self):
+        self.mock_token_allocator.available_size.return_value = 10_000
+        adder = self.create_adder(self.create_running_batch(), rem_chunk_tokens=64)
+        req = self.create_mock_req("waiting", priority=0, max_new_tokens=2)
+        req.full_untruncated_fill_ids = list(range(128))
+        req.sampling_params = SimpleNamespace(max_new_tokens=2, ignore_eos=False)
+        req.last_node = MagicMock()
+
+        result = adder.add_one_req(
+            req, has_chunked_req=True, truncation_align_size=None
+        )
+
+        self.assertEqual(result, AddReqResult.OTHER)
+        self.assertEqual(adder.can_run_list, [])
+        self.assertIsNone(adder.new_chunked_req)
+
     def test_preempt_success_high_priority_values_first(self):
         params = [
             ("run1", 0, 50),

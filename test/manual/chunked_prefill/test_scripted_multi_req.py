@@ -409,6 +409,42 @@ class TestMultiReqBasic(ScriptedTestCase):
         raise AssertionError("not all reqs finished")
 
 
+class TestMultiReqFairChunkedPrefill(ScriptedTestCase):
+    ENGINE_KWARGS = base_engine_kwargs(
+        chunked_prefill_size=DEFAULT_CHUNK_SIZE,
+        enable_fair_chunked_prefill=True,
+    )
+
+    def test_short_request_runs_before_long_prefill_finishes(self):
+        self.server.execute_script(self._script_short_request_interleaves)
+
+    @staticmethod
+    def _script_short_request_interleaves(t: ScriptedContext):
+        long_req = t.start_req(
+            prompt_len=VERY_LONG_PROMPT_LEN,
+            max_new_tokens=2,
+            prompt_token=410,
+        )
+        yield from run_until(long_req, lambda h: h.is_chunking)
+        chunks_before_short = long_req.chunks_done
+
+        short_req = t.start_req(prompt_len=8, max_new_tokens=2, prompt_token=420)
+        short_ran_during_long_prefill = False
+        for _ in range(DEFAULT_MAX_STEPS):
+            if short_req.status == "running" or short_req.finished:
+                short_ran_during_long_prefill = long_req.is_chunking
+                break
+            yield
+
+        assert short_ran_during_long_prefill, (
+            "short request must reach decode while the long request still owns "
+            "the active chunked-prefill slot"
+        )
+
+        yield from run_until(long_req, lambda h: h.chunks_done > chunks_before_short)
+        yield from run_until_all_finished([long_req, short_req])
+
+
 class TestMultiReqPriority(ScriptedTestCase):
     ENGINE_KWARGS = base_engine_kwargs(
         chunked_prefill_size=DEFAULT_CHUNK_SIZE,
